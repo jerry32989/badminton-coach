@@ -4,8 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>AI 羽毛球教练</title>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/posenet@2.2.2/dist/posenet.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js"></script>
 <style>
   :root { color-scheme: dark; }
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -50,21 +49,13 @@
   .log-area { max-height: 110px; overflow-y: auto; font-size: 0.7rem; color: #aaa; line-height: 1.5; -webkit-overflow-scrolling: touch; }
   .log-area div { padding: 1px 0; }
   .toast { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 8px 18px; border-radius: 20px; font-size: 0.8rem; z-index: 99; opacity: 0; transition: opacity 0.25s; pointer-events: none; }
-  .loading-overlay {
-    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(18,18,18,0.92); z-index: 100;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
-    font-size: 0.85rem; color: #aaa;
-  }
-  .loading-overlay .spinner {
-    width: 36px; height: 36px; border: 3px solid #333; border-top-color: #1565c0;
-    border-radius: 50%; animation: spin 0.8s linear infinite;
-  }
+  #loadingScreen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(18,18,18,0.95); z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; font-size: 0.85rem; color: #aaa; }
+  #loadingScreen .spinner { width: 36px; height: 36px; border: 3px solid #333; border-top-color: #1565c0; border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
-<div id="loadingScreen" class="loading-overlay"><div class="spinner"></div><div>正在加载 AI 模型...</div></div>
+<div id="loadingScreen"><div class="spinner"></div><div id="loadMsg">正在加载 AI 模型...</div></div>
 <div class="container">
   <header><h1>AI 羽毛球教练</h1><span id="statusBadge" class="badge off">等待启动</span></header>
   <div class="viewport">
@@ -81,7 +72,7 @@
   </div>
   <div class="status-row">
     <span id="lblFps">FPS: --</span><span id="lblFrames">帧数: 0</span>
-    <span id="lblAlerts">提醒: 0</span><span id="lblModel">模型: PoseNet</span>
+    <span id="lblAlerts">提醒: 0</span><span id="lblModel">模型: MediaPipe</span>
   </div>
   <div class="panel">
     <div class="card">
@@ -106,66 +97,76 @@ var chkSpeech=document.getElementById("chkSpeech"),statusBadge=document.getEleme
 var fpsOverlay=document.getElementById("fpsOverlay"),feedbackOverlay=document.getElementById("feedbackOverlay");
 var lblFps=document.getElementById("lblFps"),lblFrames=document.getElementById("lblFrames"),lblAlerts=document.getElementById("lblAlerts");
 var logArea=document.getElementById("logArea"),toastEl=document.getElementById("toast");
-var loadingScreen=document.getElementById("loadingScreen");
+var loadMsg=document.getElementById("loadMsg"),loadingScreen=document.getElementById("loadingScreen");
 var ctx=canvas.getContext("2d");
 
-var net=null,running=false,animId=null,detecting=false;
-var frameCount=0,alertCount=0,fpsHistory=[],lastFpsUpdate=0,currentFps=0;
-var prevKps=null,prevTs=0;
+var poseLandmarker=null,running=false,animId=null;
+var lastVideoTime=-1,frameCount=0,alertCount=0;
+var fpsHistory=[],lastFpsUpdate=0,currentFps=0;
+var prevLandmarks=null,prevTimestamp=0;
 var sessionLog=[],cooldowns={},CD=3000;
 
-var CONNECTIONS=[[5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16]];
+var CONNECTIONS=[
+  [0,1],[1,2],[2,3],[3,7],[0,4],[4,5],[5,6],[6,8],
+  [9,10],[11,12],[11,13],[13,15],[15,17],[15,19],[15,21],[17,19],
+  [12,14],[14,16],[16,18],[16,20],[16,22],[18,20],
+  [11,23],[12,24],[23,24],[23,25],[25,27],[27,29],[29,31],
+  [24,26],[26,28],[28,30],[30,32]
+];
 
-// PoseNet keypoint order: nose=0,leftEye=1,rightEye=2,leftEar=3,rightEar=4,
-// leftShoulder=5,rightShoulder=6,leftElbow=7,rightElbow=8,leftWrist=9,rightWrist=10,
-// leftHip=11,rightHip=12,leftKnee=13,rightKnee=14,leftAnkle=15,rightAnkle=16
-// This matches MoveNet indexing perfectly for 5-16.
+function toast(m,d){toastEl.textContent=m;toastEl.style.opacity="1";clearTimeout(toast._t);toast._t=setTimeout(function(){toastEl.style.opacity="0"},d||2000)}
+function log(m){var d=document.createElement("div");d.textContent="["+new Date().toLocaleTimeString()+"] "+m;logArea.prepend(d);while(logArea.children.length>50)logArea.lastChild.remove()}
+function speak(m){if(!chkSpeech.checked||!window.speechSynthesis)return;window.speechSynthesis.cancel();var u=new SpeechSynthesisUtterance(m);u.lang="zh-CN";u.rate=1;u.pitch=1;u.volume=0.9;window.speechSynthesis.speak(u)}
+function fb(k,m){var n=Date.now();if(cooldowns[k]&&n-cooldowns[k]<CD)return;cooldowns[k]=n;alertCount++;lblAlerts.textContent="提醒: "+alertCount;feedbackOverlay.textContent=m;feedbackOverlay.style.opacity="1";setTimeout(function(){feedbackOverlay.style.opacity="0"},1500);log(m);speak(m)}
 
-function toast(m,d){toastEl.textContent=m;toastEl.style.opacity="1";clearTimeout(toast._t);toast._t=setTimeout(function(){toastEl.style.opacity="0"},d||2000);}
-function log(m){var d=document.createElement("div");d.textContent="["+new Date().toLocaleTimeString()+"] "+m;logArea.prepend(d);while(logArea.children.length>50)logArea.lastChild.remove();}
-function speak(m){if(!chkSpeech.checked||!window.speechSynthesis)return;window.speechSynthesis.cancel();var u=new SpeechSynthesisUtterance(m);u.lang="zh-CN";u.rate=1;u.pitch=1;u.volume=0.9;window.speechSynthesis.speak(u);}
-function fb(k,m){var n=Date.now();if(cooldowns[k]&&n-cooldowns[k]<CD)return;cooldowns[k]=n;alertCount++;lblAlerts.textContent="提醒: "+alertCount;feedbackOverlay.textContent=m;feedbackOverlay.style.opacity="1";setTimeout(function(){feedbackOverlay.style.opacity="0"},1500);log(m);speak(m);}
+function getLM(lm,i){return lm&&lm[i]?lm[i]:null}
 
-function angle2d(a,b,c){var ba=[a.x-b.x,a.y-b.y],bc=[c.x-b.x,c.y-b.y];var dot=ba[0]*bc[0]+ba[1]*bc[1];var mA=Math.sqrt(ba[0]*ba[0]+ba[1]*ba[1]),mB=Math.sqrt(bc[0]*bc[0]+bc[1]*bc[1]);if(mA<1e-6||mB<1e-6)return 0;return Math.acos(Math.max(-1,Math.min(1,dot/(mA*mB))))*180/Math.PI;}
-
-function toIdx(kps,parts){
-  // Convert PoseNet keypoints (by part name) to indexed array
-  var out=[];
-  for(var i=0;i<parts.length;i++){out[i]={x:kps[i].position.x,y:kps[i].position.y,score:kps[i].score};}
-  return out;
+function angle3d(a,b,c){
+  var ba=[a.x-b.x,a.y-b.y,a.z-b.z],bc=[c.x-b.x,c.y-b.y,c.z-b.z];
+  var dot=ba[0]*bc[0]+ba[1]*bc[1]+ba[2]*bc[2];
+  var mA=Math.sqrt(ba[0]*ba[0]+ba[1]*ba[1]+ba[2]*ba[2]);
+  var mB=Math.sqrt(bc[0]*bc[0]+bc[1]*bc[1]+bc[2]*bc[2]);
+  if(mA<1e-6||mB<1e-6)return 0;
+  return Math.acos(Math.max(-1,Math.min(1,dot/(mA*mB))))*180/Math.PI;
 }
 
-function drawSkeleton(kps){
+function drawSkeleton(landmarks){
+  if(!landmarks||landmarks.length<33)return;
   var w=canvas.width,h=canvas.height,lw=Math.max(1.5,Math.min(w,h)/300);
   ctx.strokeStyle="rgba(0,255,100,0.55)";ctx.lineWidth=lw;
   for(var i=0;i<CONNECTIONS.length;i++){
     var a=CONNECTIONS[i][0],b=CONNECTIONS[i][1];
-    if(kps[a].score<0.3||kps[b].score<0.3)continue;
-    ctx.beginPath();ctx.moveTo(kps[a].x,kps[a].y);ctx.lineTo(kps[b].x,kps[b].y);ctx.stroke();
+    var pa=landmarks[a],pb=landmarks[b];
+    if(!pa||!pb||pa.visibility<0.5||pb.visibility<0.5)continue;
+    ctx.beginPath();ctx.moveTo(pa.x*w,pa.y*h);ctx.lineTo(pb.x*w,pb.y*h);ctx.stroke();
   }
   var r=Math.max(2.5,Math.min(w,h)/180);
-  for(var j=0;j<kps.length;j++){var kp=kps[j];if(kp.score<0.3)continue;ctx.beginPath();ctx.arc(kp.x,kp.y,r,0,2*Math.PI);ctx.fillStyle="#00ff64";ctx.fill();}
-  var keys=[5,6,7,8,9,10,11,12,13,14];
-  for(var k=0;k<keys.length;k++){var kp2=kps[keys[k]];if(kp2.score<0.3)continue;ctx.beginPath();ctx.arc(kp2.x,kp2.y,r+2,0,2*Math.PI);ctx.strokeStyle="#ffeb3b";ctx.lineWidth=1.5;ctx.stroke();}
+  for(var j=0;j<landmarks.length;j++){
+    var lm=landmarks[j];if(!lm||lm.visibility<0.5)continue;
+    ctx.beginPath();ctx.arc(lm.x*w,lm.y*h,r,0,2*Math.PI);ctx.fillStyle="#00ff64";ctx.fill();
+  }
+  var keys=[11,12,13,14,15,16,23,24,25,26];
+  for(var k=0;k<keys.length;k++){
+    var lm2=landmarks[keys[k]];if(!lm2||lm2.visibility<0.5)continue;
+    ctx.beginPath();ctx.arc(lm2.x*w,lm2.y*h,r+2,0,2*Math.PI);ctx.strokeStyle="#ffeb3b";ctx.lineWidth=1.5;ctx.stroke();
+  }
 }
 
-function analyzePose(kps,ts){
-  var shL=kps[5],shR=kps[6],elL=kps[7],elR=kps[8],wrL=kps[9],wrR=kps[10];
-  var hiL=kps[11],hiR=kps[12],knL=kps[13],knR=kps[14],anL=kps[15],anR=kps[16];
-  function ok(a,b,c){return a&&b&&c&&a.score>0.3&&b.score>0.3&&c.score>0.3;}
-  var eaR=ok(shR,elR,wrR)?angle2d(shR,elR,wrR):null,eaL=ok(shL,elL,wrL)?angle2d(shL,elL,wrL):null;
-  var kaR=ok(hiR,knR,anR)?angle2d(hiR,knR,anR):null,kaL=ok(hiL,knL,anL)?angle2d(hiL,knL,anL):null;
-  var wristH=null;if(shR&&wrR&&shR.score>0.3&&wrR.score>0.3)wristH=shR.y-wrR.y;
+function analyzePose(landmarks,ts){
+  if(!landmarks||landmarks.length<33)return;
+  var shL=getLM(landmarks,11),shR=getLM(landmarks,12),elL=getLM(landmarks,13),elR=getLM(landmarks,14);
+  var wrL=getLM(landmarks,15),wrR=getLM(landmarks,16),hipL=getLM(landmarks,23),hipR=getLM(landmarks,24);
+  var knL=getLM(landmarks,25),knR=getLM(landmarks,26),anL=getLM(landmarks,27),anR=getLM(landmarks,28);
+  var eaR=(shR&&elR&&wrR)?angle3d(shR,elR,wrR):null,eaL=(shL&&elL&&wrL)?angle3d(shL,elL,wrL):null;
+  var kaR=(hipR&&knR&&anR)?angle3d(hipR,knR,anR):null,kaL=(hipL&&knL&&anL)?angle3d(hipL,knL,anL):null;
+  var wristH=null;if(shR&&wrR)wristH=shR.y-wrR.y;
   var rotSpeed=0;
-  if(shL&&shR&&shL.score>0.3&&shR.score>0.3&&prevKps){
-    var pL=prevKps[5],pR=prevKps[6];
-    if(pL&&pR&&pL.score>0.3&&pR.score>0.3){
-      var ca=Math.atan2(shR.y-shL.y,shR.x-shL.x)*180/Math.PI,pa=Math.atan2(pR.y-pL.y,pR.x-pL.x)*180/Math.PI;
-      var dt=(ts-prevTs)/1000;if(dt>0)rotSpeed=Math.abs(ca-pa)/dt;
-    }
+  if(shL&&shR&&prevLandmarks){
+    var pL=getLM(prevLandmarks,11),pR=getLM(prevLandmarks,12);
+    if(pL&&pR){var ca=Math.atan2(shR.y-shL.y,shR.x-shL.x)*180/Math.PI,pa=Math.atan2(pR.y-pL.y,pR.x-pL.x)*180/Math.PI;var dt=(ts-prevTimestamp)/1000;if(dt>0)rotSpeed=Math.abs(ca-pa)/dt;}
   }
   function setM(id,val,th){
-    var el=document.getElementById(id);if(val==null){el.textContent="--";el.className="val";return;}
+    var el=document.getElementById(id);if(val==null){el.textContent="--";el.className="val";return}
     var sfx=id.indexOf("Angle")!==-1?"\u00b0":(id.indexOf("Speed")!==-1?"\u00b0/s":"");
     el.textContent=val.toFixed(1)+sfx;if(th)el.className="val "+(val<=th[0]?"good":val<=th[1]?"warn":"bad");
   }
@@ -173,36 +174,42 @@ function analyzePose(kps,ts){
   setM("mRotSpeed",rotSpeed,null);setM("mWristH",wristH,null);
   if(eaR!==null&&eaR>160)fb("er","右肘太直，屈肘准备发力");if(eaL!==null&&eaL>160)fb("el","左肘太直，屈肘准备发力");
   if(kaR!==null&&kaR>160)fb("kr","膝盖太直，微屈膝降低重心");if(kaL!==null&&kaL>160)fb("kl","膝盖太直，微屈膝降低重心");
-  if(wristH!==null&&wristH<-1)fb("wl","手腕低于肩，举拍准备");if(rotSpeed>200)fb("rf","身体旋转过快，注意重心");
-  sessionLog.push({t:ts,elbowR:eaR,elbowL:eaL,kneeR:kaR,kneeL:kaL,wristH:wristH,rotSpeed:rotSpeed});
-  prevKps=kps;prevTs=ts;
+  if(wristH!==null&&wristH<-0.02)fb("wl","手腕低于肩，举拍准备");if(rotSpeed>200)fb("rf","身体旋转过快，注意重心");
+  sessionLog.push({t:ts,elbowR:eaR,elbowL:eaL,kneeR:kaR,kneeL:kaL,wristH:wristH,rotSpeed:rotSpeed,
+    landmarks:landmarks.map(function(l){return {x:l.x,y:l.y,z:l.z,v:l.visibility}})});
+  prevLandmarks=landmarks;prevTimestamp=ts;
 }
 
-async function detectLoop(){
+function detectLoop(){
   if(!running)return;var now=performance.now();
-  if(net&&video.readyState>=2&&!detecting){
-    detecting=true;
-    try{
-      var pose=await net.estimateSinglePose(video,{flipHorizontal:false});
-      if(pose&&pose.keypoints&&pose.keypoints.length>=17){
-        var kps=toIdx(pose.keypoints);
-        if(canvas.width!==video.videoWidth||canvas.height!==video.videoHeight){canvas.width=video.videoWidth;canvas.height=video.videoHeight;}
-        ctx.clearRect(0,0,canvas.width,canvas.height);drawSkeleton(kps);analyzePose(kps,now);frameCount++;
-      }
-    }catch(e){if(!detectLoop._el){log("检测错误: "+(e.message||e));detectLoop._el=true;}}
-    detecting=false;
-  }
+  if(video.currentTime!==lastVideoTime){lastVideoTime=video.currentTime;
+    if(canvas.width!==video.videoWidth||canvas.height!==video.videoHeight){canvas.width=video.videoWidth;canvas.height=video.videoHeight;}
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if(poseLandmarker){try{var results=poseLandmarker.detectForVideo(video,now);if(results&&results.landmarks&&results.landmarks.length>0){drawSkeleton(results.landmarks[0]);analyzePose(results.landmarks[0],now);frameCount++}}catch(e){if(!detectLoop._el){log("检测错误: "+(e.message||e));detectLoop._el=true}}}}
   fpsHistory.push(now);while(fpsHistory.length&&fpsHistory[0]<now-1000)fpsHistory.shift();
-  if(now-lastFpsUpdate>500){currentFps=fpsHistory.length;fpsOverlay.textContent=currentFps+" FPS";lblFps.textContent="FPS: "+currentFps;lblFrames.textContent="帧数: "+frameCount;lastFpsUpdate=now;}
+  if(now-lastFpsUpdate>500){currentFps=fpsHistory.length;fpsOverlay.textContent=currentFps+" FPS";lblFps.textContent="FPS: "+currentFps;lblFrames.textContent="帧数: "+frameCount;lastFpsUpdate=now}
   animId=requestAnimationFrame(detectLoop);
 }
 
-async function initModel(){
-  statusBadge.textContent="加载中...";statusBadge.className="badge load";
-  await tf.ready();log("TF 后端: "+(tf.getBackend()||"?"));
-  net=await posenet.load({architecture:"MobileNetV1",outputStride:16,inputResolution:257,multiplier:0.75});
-  statusBadge.textContent="模型就绪";statusBadge.className="badge on";
-  log("PoseNet 模型加载完成");toast("AI 模型就绪",2000);loadingScreen.style.display="none";
+async function initMediaPipe(){
+  loadMsg.textContent="正在下载 AI 模型 (5.7MB)...";
+  var ok=false;
+  var tid=setTimeout(function(){if(!ok){loadMsg.textContent="模型下载超时，请检查网络后刷新";loadingScreen.querySelector(".spinner").style.display="none";}},45000);
+
+  var modelUrl="https://jerry32989.github.io/badminton-coach/pose_landmarker_lite.task";
+  var vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
+  log("WASM 加载完成");
+
+  // CPU delegate - no SharedArrayBuffer needed
+  poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
+    baseOptions:{modelAssetPath:modelUrl,delegate:"CPU"},
+    runningMode:"VIDEO",numPoses:1,
+    minPoseDetectionConfidence:0.5,minPosePresenceConfidence:0.5,minTrackingConfidence:0.5
+  });
+
+  clearTimeout(tid);ok=true;
+  loadingScreen.style.display="none";statusBadge.textContent="模型就绪";statusBadge.className="badge on";
+  log("MediaPipe 就绪 (CPU)");toast("AI 模型就绪",2000);
 }
 
 async function startCamera(){
@@ -210,37 +217,38 @@ async function startCamera(){
   try{
     var stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640,max:640},height:{ideal:480,max:480},facingMode:"user"}});
     video.srcObject=stream;await video.play();
-    if(!net){try{await initModel();}catch(e){log("模型失败: "+(e.message||e));toast("模型加载失败，请刷新",4000);statusBadge.textContent="模型失败";statusBadge.className="badge off";video.srcObject.getTracks().forEach(function(t){t.stop()});video.srcObject=null;btnStart.disabled=false;return;}}
-    running=true;frameCount=0;alertCount=0;sessionLog=[];prevKps=null;prevTs=0;fpsHistory=[];detecting=false;detectLoop._el=false;
+    if(!poseLandmarker){try{await initMediaPipe()}catch(e){loadMsg.textContent="加载失败: "+(e.message||e).slice(0,60);loadingScreen.querySelector(".spinner").style.display="none";statusBadge.textContent="失败";statusBadge.className="badge off";btnStart.disabled=false;video.srcObject.getTracks().forEach(function(t){t.stop()});video.srcObject=null;return}}
+    running=true;frameCount=0;alertCount=0;sessionLog=[];prevLandmarks=null;prevTimestamp=0;fpsHistory=[];detectLoop._el=false;
     Object.keys(cooldowns).forEach(function(k){delete cooldowns[k]});
     detectLoop();btnStop.disabled=false;btnExport.disabled=false;
     statusBadge.textContent="运行中";statusBadge.className="badge on";log("摄像头已启动");toast("开始分析姿态",1500);
   }catch(e){log("错误: "+(e.message||e));statusBadge.textContent="启动失败";statusBadge.className="badge off";btnStart.disabled=false;
-    if((e.message||"").indexOf("NotAllowed")!==-1)toast("请允许摄像头权限",4000);else toast((e.message||"").slice(0,40),4000);}
+    if((e.message||"").indexOf("NotAllowed")!==-1)toast("请允许摄像头权限",4000);else toast((e.message||"").slice(0,40),4000)}
 }
 
 function stopCamera(){
-  running=false;if(animId){cancelAnimationFrame(animId);animId=null;}
-  if(video.srcObject){video.srcObject.getTracks().forEach(function(t){t.stop()});video.srcObject=null;}
+  running=false;if(animId){cancelAnimationFrame(animId);animId=null}
+  if(video.srcObject){video.srcObject.getTracks().forEach(function(t){t.stop()});video.srcObject=null}
   ctx.clearRect(0,0,canvas.width,canvas.height);btnStart.disabled=false;btnStop.disabled=true;
   statusBadge.textContent="已停止";statusBadge.className="badge off";log("已停止");
 }
 
 function exportReport(){
-  if(!sessionLog.length){toast("没有数据可导出",2000);return;}
-  function avg(a){var s=0;for(var i=0;i<a.length;i++)s+=a[i];return s/a.length;}
-  function max(a){var m=-Infinity;for(var i=0;i<a.length;i++){if(a[i]>m)m=a[i];}return m;}
+  if(!sessionLog.length){toast("没有数据可导出",2000);return}
+  function avg(a){var s=0;for(var i=0;i<a.length;i++)s+=a[i];return s/a.length}
+  function max(a){var m=-Infinity;for(var i=0;i<a.length;i++){if(a[i]>m)m=a[i]}return m}
   var ev=[],kv=[],rv=[],es=0,ks=0;
-  for(var i=0;i<sessionLog.length;i++){var f=sessionLog[i];if(f.elbowR!=null)ev.push(f.elbowR);if(f.kneeR!=null)kv.push(f.kneeR);if(f.rotSpeed!=null)rv.push(f.rotSpeed);if(f.elbowR&&f.elbowR>160)es++;if(f.kneeR&&f.kneeR>160)ks++;}
-  var rpt={generated:new Date().toISOString(),totalFrames:sessionLog.length,totalAlerts:alertCount,model:"PoseNet MobileNetV1",summary:{avgElbowAngleR:ev.length?avg(ev).toFixed(1):null,avgKneeAngleR:kv.length?avg(kv).toFixed(1):null,maxRotationSpeed:rv.length?max(rv).toFixed(1):null,elbowTooStraight:es,kneesTooStraight:ks},frames:sessionLog};
+  for(var i=0;i<sessionLog.length;i++){var f=sessionLog[i];if(f.elbowR!=null)ev.push(f.elbowR);if(f.kneeR!=null)kv.push(f.kneeR);if(f.rotSpeed!=null)rv.push(f.rotSpeed);if(f.elbowR&&f.elbowR>160)es++;if(f.kneeR&&f.kneeR>160)ks++}
+  var rpt={generated:new Date().toISOString(),totalFrames:sessionLog.length,totalAlerts:alertCount,model:"MediaPipe Lite",summary:{avgElbowAngleR:ev.length?avg(ev).toFixed(1):null,avgKneeAngleR:kv.length?avg(kv).toFixed(1):null,maxRotationSpeed:rv.length?max(rv).toFixed(1):null,elbowTooStraight:es,kneesTooStraight:ks},frames:sessionLog.map(function(f){return {t:f.t,elbowR:f.elbowR,elbowL:f.elbowL,kneeR:f.kneeR,kneeL:f.kneeL,wristH:f.wristH,rotSpeed:f.rotSpeed}})}
   var blob=new Blob([JSON.stringify(rpt,null,2)],{type:"application/json"}),a=document.createElement("a");
   a.href=URL.createObjectURL(blob);a.download="badminton_report_"+new Date().toISOString().slice(0,10)+".json";
-  document.body.appendChild(a);a.click();document.body.removeChild(a);log("报告已导出: "+rpt.totalFrames+" 帧");toast("报告已下载",2000);
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  log("报告已导出: "+rpt.totalFrames+" 帧");toast("报告已下载",2000);
 }
 
-btnStart.addEventListener("click",function(){startCamera().catch(function(e){log("异常: "+(e.message||e));statusBadge.textContent="失败";statusBadge.className="badge off";btnStart.disabled=false;});});
+btnStart.addEventListener("click",function(){startCamera().catch(function(e){log("异常: "+(e.message||e));statusBadge.textContent="失败";statusBadge.className="badge off";btnStart.disabled=false})});
 btnStop.addEventListener("click",stopCamera);btnExport.addEventListener("click",exportReport);
-log("就绪 - PoseNet");
+log("就绪 - 模型走 GitHub 免 Google");
 })();
 </script>
 </body>
