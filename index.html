@@ -1,0 +1,719 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>AI 羽毛球教练</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: #121212;
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding: 8px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 720px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px 0;
+  }
+  header h1 { font-size: 1.1rem; font-weight: 600; }
+  .badge {
+    font-size: 0.65rem;
+    padding: 3px 10px;
+    border-radius: 10px;
+    background: #2a2a2a;
+    white-space: nowrap;
+  }
+  .badge.on  { background: #1b5e20; color: #81c784; }
+  .badge.off { background: #4a1414; color: #ef9a9a; }
+
+  .viewport {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 3 / 4;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #000;
+    flex-shrink: 0;
+  }
+  @media (min-width: 500px) { .viewport { aspect-ratio: 4 / 3; } }
+
+  video, canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+  }
+
+  video { transform: scaleX(-1); }
+  canvas { transform: scaleX(-1); }
+
+  .overlay {
+    position: absolute;
+    top: 6px; left: 6px;
+    font-size: 0.7rem;
+    background: rgba(0,0,0,0.7);
+    color: #ccc;
+    padding: 2px 8px;
+    border-radius: 4px;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .overlay.feedback {
+    top: auto; bottom: 6px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #ffeb3b;
+    text-align: center;
+    max-width: 92%;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .controls {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  button {
+    min-height: 40px;
+    padding: 8px 14px;
+    border: 1px solid #444;
+    border-radius: 8px;
+    background: #1e1e1e;
+    color: #e0e0e0;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: background 0.15s;
+    touch-action: manipulation;
+    white-space: nowrap;
+  }
+  button:hover { background: #333; }
+  button:active { background: #444; }
+  button.primary { background: #1565c0; border-color: #1565c0; }
+  button.primary:hover { background: #1976d2; }
+  button.primary:active { background: #0d47a1; }
+
+  button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .controls label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+    min-height: 40px;
+    padding: 0 4px;
+    touch-action: manipulation;
+  }
+  .controls input[type="checkbox"] { width: 18px; height: 18px; accent-color: #1565c0; }
+
+  .status-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 0.72rem;
+    color: #999;
+  }
+
+  .panel {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  @media (min-width: 500px) { .panel { grid-template-columns: 1fr 1fr; } }
+
+  .card {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .card h3 {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #888;
+    margin-bottom: 6px;
+  }
+
+  .metric {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    border-bottom: 1px solid #222;
+    font-size: 0.78rem;
+  }
+  .metric:last-child { border-bottom: none; }
+  .metric .val { font-weight: 600; }
+  .metric .val.good { color: #81c784; }
+  .metric .val.warn { color: #ffb74d; }
+  .metric .val.bad  { color: #ef5350; }
+
+  .log-area {
+    max-height: 110px;
+    overflow-y: auto;
+    font-size: 0.7rem;
+    color: #aaa;
+    line-height: 1.5;
+    -webkit-overflow-scrolling: touch;
+  }
+  .log-area div { padding: 1px 0; }
+
+  .toast {
+    position: fixed;
+    top: 12px; left: 50%;
+    transform: translateX(-50%);
+    background: #333;
+    color: #fff;
+    padding: 8px 18px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    z-index: 99;
+    opacity: 0;
+    transition: opacity 0.25s;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>AI 羽毛球教练</h1>
+    <span id="statusBadge" class="badge off">等待启动</span>
+  </header>
+
+  <div class="viewport">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    <div class="overlay" id="fpsOverlay">-- FPS</div>
+    <div class="overlay feedback" id="feedbackOverlay"></div>
+  </div>
+
+  <div class="controls">
+    <button id="btnStart" class="primary">启动摄像头</button>
+    <button id="btnStop" disabled>停止</button>
+    <button id="btnExport" disabled>导出报告</button>
+    <label><input type="checkbox" id="chkSpeech" checked> 语音</label>
+  </div>
+
+  <div class="status-row">
+    <span id="lblFps">FPS: --</span>
+    <span id="lblFrames">帧数: 0</span>
+    <span id="lblAlerts">提醒: 0</span>
+    <span id="lblDelegate">后端: --</span>
+  </div>
+
+  <div class="panel">
+    <div class="card">
+      <h3>实时指标</h3>
+      <div class="metric"><span>右肘角度</span><span class="val" id="mElbowR">--</span></div>
+      <div class="metric"><span>左肘角度</span><span class="val" id="mElbowL">--</span></div>
+      <div class="metric"><span>右膝角度</span><span class="val" id="mKneeR">--</span></div>
+      <div class="metric"><span>左膝角度</span><span class="val" id="mKneeL">--</span></div>
+      <div class="metric"><span>旋转速度</span><span class="val" id="mRotSpeed">--</span></div>
+      <div class="metric"><span>手腕高度</span><span class="val" id="mWristH">--</span></div>
+    </div>
+    <div class="card">
+      <h3>事件日志</h3>
+      <div class="log-area" id="logArea"></div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function() {
+  var video     = document.getElementById("video");
+  var canvas    = document.getElementById("canvas");
+  var ctx       = canvas.getContext("2d");
+  var btnStart  = document.getElementById("btnStart");
+  var btnStop   = document.getElementById("btnStop");
+  var btnExport = document.getElementById("btnExport");
+  var chkSpeech = document.getElementById("chkSpeech");
+  var statusBadge  = document.getElementById("statusBadge");
+  var fpsOverlay   = document.getElementById("fpsOverlay");
+  var feedbackOverlay = document.getElementById("feedbackOverlay");
+  var lblFps     = document.getElementById("lblFps");
+  var lblFrames  = document.getElementById("lblFrames");
+  var lblAlerts  = document.getElementById("lblAlerts");
+  var lblDelegate = document.getElementById("lblDelegate");
+  var logArea    = document.getElementById("logArea");
+  var toastEl    = document.getElementById("toast");
+
+  var poseLandmarker = null;
+  var running = false;
+  var animId = null;
+  var lastVideoTime = -1;
+  var frameCount = 0;
+  var alertCount = 0;
+  var fpsHistory = [];
+  var lastFpsUpdate = 0;
+  var currentFps = 0;
+  var usedDelegate = "--";
+
+  var prevLandmarks = null;
+  var prevTimestamp = 0;
+  var sessionLog = [];
+  var cooldowns = {};
+  var COOLDOWN_MS = 3000;
+
+  var CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,7], [0,4],[4,5],[5,6],[6,8],
+    [9,10], [11,12], [11,13],[13,15],[15,17],[15,19],[15,21],[17,19],
+    [12,14],[14,16],[16,18],[16,20],[16,22],[18,20],
+    [11,23],[12,24],[23,24], [23,25],[25,27],[27,29],[29,31],
+    [24,26],[26,28],[28,30],[30,32]
+  ];
+
+  function toast(msg, ms) {
+    toastEl.textContent = msg;
+    toastEl.style.opacity = "1";
+    clearTimeout(toast._tid);
+    toast._tid = setTimeout(function() { toastEl.style.opacity = "0"; }, ms || 2000);
+  }
+
+  function angle3d(a, b, c) {
+    var ba = [a.x - b.x, a.y - b.y, a.z - b.z];
+    var bc = [c.x - b.x, c.y - b.y, c.z - b.z];
+    var dot = ba[0]*bc[0] + ba[1]*bc[1] + ba[2]*bc[2];
+    var magBA = Math.sqrt(ba[0]*ba[0] + ba[1]*ba[1] + ba[2]*ba[2]);
+    var magBC = Math.sqrt(bc[0]*bc[0] + bc[1]*bc[1] + bc[2]*bc[2]);
+    if (magBA < 1e-6 || magBC < 1e-6) return 0;
+    var cos = Math.max(-1, Math.min(1, dot / (magBA * magBC)));
+    return (Math.acos(cos) * 180) / Math.PI;
+  }
+
+  function getLandmark(lmList, idx) {
+    return lmList && lmList[idx] ? lmList[idx] : null;
+  }
+
+  function log(msg) {
+    var time = new Date().toLocaleTimeString();
+    var div = document.createElement("div");
+    div.textContent = "[" + time + "] " + msg;
+    logArea.prepend(div);
+    while (logArea.children.length > 50) logArea.lastChild.remove();
+  }
+
+  function speak(text) {
+    if (!chkSpeech.checked) return;
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    var u = new SpeechSynthesisUtterance(text);
+    u.lang = "zh-CN";
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    u.volume = 0.9;
+    window.speechSynthesis.speak(u);
+  }
+
+  function tryFeedback(ruleKey, text) {
+    var now = Date.now();
+    if (cooldowns[ruleKey] && now - cooldowns[ruleKey] < COOLDOWN_MS) return;
+    cooldowns[ruleKey] = now;
+    alertCount++;
+    lblAlerts.textContent = "提醒: " + alertCount;
+    feedbackOverlay.textContent = text;
+    feedbackOverlay.style.opacity = "1";
+    setTimeout(function() { feedbackOverlay.style.opacity = "0"; }, 1500);
+    log(text);
+    speak(text);
+  }
+
+  function drawSkeleton(landmarks) {
+    if (!landmarks || landmarks.length < 33) return;
+    var w = canvas.width;
+    var h = canvas.height;
+
+    ctx.strokeStyle = "rgba(0,255,100,0.55)";
+    ctx.lineWidth = Math.max(1.5, Math.min(w, h) / 300);
+    for (var i = 0; i < CONNECTIONS.length; i++) {
+      var a = CONNECTIONS[i][0], b = CONNECTIONS[i][1];
+      var pa = landmarks[a], pb = landmarks[b];
+      if (!pa || !pb || pa.visibility < 0.5 || pb.visibility < 0.5) continue;
+      ctx.beginPath();
+      ctx.moveTo(pa.x * w, pa.y * h);
+      ctx.lineTo(pb.x * w, pb.y * h);
+      ctx.stroke();
+    }
+
+    var r = Math.max(2.5, Math.min(w, h) / 180);
+    for (var j = 0; j < landmarks.length; j++) {
+      var lm = landmarks[j];
+      if (!lm || lm.visibility < 0.5) continue;
+      ctx.beginPath();
+      ctx.arc(lm.x * w, lm.y * h, r, 0, 2 * Math.PI);
+      ctx.fillStyle = "#00ff64";
+      ctx.fill();
+    }
+
+    var keyJoints = [11,12,13,14,15,16,23,24,25,26];
+    var r2 = r + 2;
+    for (var k = 0; k < keyJoints.length; k++) {
+      var idx = keyJoints[k];
+      var lm = landmarks[idx];
+      if (!lm || lm.visibility < 0.5) continue;
+      ctx.beginPath();
+      ctx.arc(lm.x * w, lm.y * h, r2, 0, 2 * Math.PI);
+      ctx.strokeStyle = "#ffeb3b";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  function analyzePose(landmarks, timestamp) {
+    if (!landmarks || landmarks.length < 33) return;
+
+    var shL  = getLandmark(landmarks, 11);
+    var shR  = getLandmark(landmarks, 12);
+    var elL  = getLandmark(landmarks, 13);
+    var elR  = getLandmark(landmarks, 14);
+    var wrL  = getLandmark(landmarks, 15);
+    var wrR  = getLandmark(landmarks, 16);
+    var hipL = getLandmark(landmarks, 23);
+    var hipR = getLandmark(landmarks, 24);
+    var knL  = getLandmark(landmarks, 25);
+    var knR  = getLandmark(landmarks, 26);
+    var anL  = getLandmark(landmarks, 27);
+    var anR  = getLandmark(landmarks, 28);
+
+    var elbowAngleR = (shR && elR && wrR) ? angle3d(shR, elR, wrR) : null;
+    var elbowAngleL = (shL && elL && wrL) ? angle3d(shL, elL, wrL) : null;
+    var kneeAngleR  = (hipR && knR && anR) ? angle3d(hipR, knR, anR) : null;
+    var kneeAngleL  = (hipL && knL && anL) ? angle3d(hipL, knL, anL) : null;
+
+    var wristHeightRatio = null;
+    if (shR && wrR) { wristHeightRatio = shR.y - wrR.y; }
+
+    var rotationSpeed = 0;
+    if (shL && shR && prevLandmarks) {
+      var prevShL = getLandmark(prevLandmarks, 11);
+      var prevShR = getLandmark(prevLandmarks, 12);
+      if (prevShL && prevShR) {
+        var curAngle = Math.atan2(shR.y - shL.y, shR.x - shL.x) * 180 / Math.PI;
+        var prevAngle = Math.atan2(prevShR.y - prevShL.y, prevShR.x - prevShL.x) * 180 / Math.PI;
+        var dt = (timestamp - prevTimestamp) / 1000;
+        if (dt > 0) rotationSpeed = Math.abs(curAngle - prevAngle) / dt;
+      }
+    }
+
+    function setMetric(id, val, thresholds) {
+      var el = document.getElementById(id);
+      var isAngle = id.indexOf("Angle") !== -1;
+      var isSpeed = id.indexOf("Speed") !== -1;
+      if (val == null) { el.textContent = "--"; el.className = "val"; return; }
+      var suffix = isAngle ? "\u00b0" : (isSpeed ? "\u00b0/s" : "");
+      el.textContent = val.toFixed(1) + suffix;
+      if (thresholds) {
+        if (val <= thresholds[0]) el.className = "val good";
+        else if (val <= thresholds[1]) el.className = "val warn";
+        else el.className = "val bad";
+      }
+    }
+
+    setMetric("mElbowR", elbowAngleR, [80, 130]);
+    setMetric("mElbowL", elbowAngleL, [80, 130]);
+    setMetric("mKneeR",  kneeAngleR,  [140, 160]);
+    setMetric("mKneeL",  kneeAngleL,  [140, 160]);
+    setMetric("mRotSpeed", rotationSpeed, null);
+    setMetric("mWristH", wristHeightRatio, null);
+
+    if (elbowAngleR !== null && elbowAngleR > 160) {
+      tryFeedback("elbowR_high", "\u53f3\u8098\u592a\u76f4\uff0c\u5c48\u8098\u51c6\u5907\u53d1\u529b");
+    }
+    if (elbowAngleL !== null && elbowAngleL > 160) {
+      tryFeedback("elbowL_high", "\u5de6\u8098\u592a\u76f4\uff0c\u5c48\u8098\u51c6\u5907\u53d1\u529b");
+    }
+    if (kneeAngleR !== null && kneeAngleR > 160) {
+      tryFeedback("kneeR", "\u819d\u76d6\u592a\u76f4\uff0c\u5fae\u5c48\u819d\u964d\u4f4e\u91cd\u5fc3");
+    }
+    if (kneeAngleL !== null && kneeAngleL > 160) {
+      tryFeedback("kneeL", "\u819d\u76d6\u592a\u76f4\uff0c\u5fae\u5c48\u819d\u964d\u4f4e\u91cd\u5fc3");
+    }
+    if (wristHeightRatio !== null && wristHeightRatio < -0.02) {
+      tryFeedback("wristLow", "\u624b\u8155\u4f4e\u4e8e\u80a9\uff0c\u4e3e\u62cd\u51c6\u5907");
+    }
+    if (rotationSpeed > 200) {
+      tryFeedback("rotateFast", "\u8eab\u4f53\u65cb\u8f6c\u8fc7\u5feb\uff0c\u6ce8\u610f\u91cd\u5fc3");
+    }
+
+    sessionLog.push({
+      t: timestamp,
+      elbowR: elbowAngleR,
+      elbowL: elbowAngleL,
+      kneeR: kneeAngleR,
+      kneeL: kneeAngleL,
+      wristH: wristHeightRatio,
+      rotSpeed: rotationSpeed,
+      landmarks: landmarks.map(function(l) {
+        return { x: l.x, y: l.y, z: l.z, v: l.visibility };
+      })
+    });
+
+    prevLandmarks = landmarks;
+    prevTimestamp = timestamp;
+  }
+
+  function detectLoop() {
+    if (!running) return;
+    var now = performance.now();
+
+    if (video.currentTime !== lastVideoTime) {
+      lastVideoTime = video.currentTime;
+
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (poseLandmarker) {
+        try {
+          var results = poseLandmarker.detectForVideo(video, now);
+          if (results && results.landmarks && results.landmarks.length > 0) {
+            drawSkeleton(results.landmarks[0]);
+            analyzePose(results.landmarks[0], now);
+            frameCount++;
+          }
+        } catch(e) {
+          // Silently skip frames that error (e.g. during model reset)
+        }
+      }
+    }
+
+    fpsHistory.push(now);
+    while (fpsHistory.length > 0 && fpsHistory[0] < now - 1000) fpsHistory.shift();
+    if (now - lastFpsUpdate > 500) {
+      currentFps = fpsHistory.length;
+      fpsOverlay.textContent = currentFps + " FPS";
+      lblFps.textContent = "FPS: " + currentFps;
+      lblFrames.textContent = "\u5e27\u6570: " + frameCount;
+      lastFpsUpdate = now;
+    }
+
+    animId = requestAnimationFrame(detectLoop);
+  }
+
+  async function initMediaPipe() {
+    statusBadge.textContent = "\u52a0\u8f7d\u4e2d...";
+    statusBadge.className = "badge off";
+    toast("\u6b63\u5728\u4e0b\u8f7d AI \u6a21\u578b...", 4000);
+
+    var vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+    );
+
+    // Try GPU first, fall back to CPU (mobile often needs CPU)
+    var delegate = "GPU";
+    try {
+      poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+    } catch(e) {
+      log("GPU \u4e0d\u53ef\u7528\uff0c\u5207\u6362\u5230 CPU");
+      poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+          delegate: "CPU"
+        },
+        runningMode: "VIDEO",
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      delegate = "CPU";
+    }
+
+    usedDelegate = delegate;
+    lblDelegate.textContent = "\u540e\u7aef: " + delegate;
+    log("\u6a21\u578b\u52a0\u8f7d\u5b8c\u6210 (" + delegate + ")");
+    statusBadge.textContent = "\u6a21\u578b\u5c31\u7eea";
+    statusBadge.className = "badge on";
+    toast("\u2714 AI \u6a21\u578b\u5c31\u7eea", 2000);
+  }
+
+  async function startCamera() {
+    btnStart.disabled = true;
+    statusBadge.textContent = "\u542f\u52a8\u4e2d...";
+    statusBadge.className = "badge off";
+
+    try {
+      // Constrain resolution for mobile performance
+      var constraints = {
+        video: {
+          width: { ideal: 640, max: 640 },
+          height: { ideal: 480, max: 480 },
+          facingMode: "user"
+        }
+      };
+
+      var stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+
+      // iOS needs explicit play after setting srcObject
+      await video.play();
+
+      if (!poseLandmarker) await initMediaPipe();
+
+      running = true;
+      frameCount = 0;
+      alertCount = 0;
+      sessionLog = [];
+      prevLandmarks = null;
+      prevTimestamp = 0;
+      fpsHistory = [];
+      Object.keys(cooldowns).forEach(function(k) { delete cooldowns[k]; });
+
+      detectLoop();
+
+      btnStop.disabled = false;
+      btnExport.disabled = false;
+      statusBadge.textContent = "\u8fd0\u884c\u4e2d";
+      statusBadge.className = "badge on";
+      log("\u6444\u50cf\u5934\u5df2\u542f\u52a8");
+      toast("\u2714 \u5f00\u59cb\u5206\u6790\u59ff\u52bf", 1500);
+    } catch (err) {
+      var msg = err.message || err.toString();
+      log("\u9519\u8bef: " + msg);
+      statusBadge.textContent = "\u542f\u52a8\u5931\u8d25";
+      statusBadge.className = "badge off";
+      btnStart.disabled = false;
+
+      if (msg.indexOf("NotAllowed") !== -1 || msg.indexOf("Permission") !== -1) {
+        toast("\u26a0 \u8bf7\u5141\u8bb8\u6444\u50cf\u5934\u6743\u9650", 4000);
+      } else if (msg.indexOf("NotFound") !== -1) {
+        toast("\u26a0 \u672a\u627e\u5230\u6444\u50cf\u5934", 4000);
+      } else {
+        toast("\u26a0 " + msg.slice(0, 40), 4000);
+      }
+    }
+  }
+
+  function stopCamera() {
+    running = false;
+    if (animId) { cancelAnimationFrame(animId); animId = null; }
+    if (video.srcObject) {
+      video.srcObject.getTracks().forEach(function(t) { t.stop(); });
+      video.srcObject = null;
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    statusBadge.textContent = "\u5df2\u505c\u6b62";
+    statusBadge.className = "badge off";
+    log("\u5df2\u505c\u6b62");
+  }
+
+  function exportReport() {
+    if (sessionLog.length === 0) { toast("\u6ca1\u6709\u6570\u636e\u53ef\u5bfc\u51fa", 2000); return; }
+
+    var elbowRVals = [], kneeRVals = [], rotVals = [];
+    for (var i = 0; i < sessionLog.length; i++) {
+      var f = sessionLog[i];
+      if (f.elbowR != null) elbowRVals.push(f.elbowR);
+      if (f.kneeR  != null) kneeRVals.push(f.kneeR);
+      if (f.rotSpeed != null) rotVals.push(f.rotSpeed);
+    }
+
+    function avg(arr) { var s = 0; for (var i = 0; i < arr.length; i++) s += arr[i]; return s / arr.length; }
+    function max(arr) { var m = -Infinity; for (var i = 0; i < arr.length; i++) { if (arr[i] > m) m = arr[i]; } return m; }
+
+    var elbowTooStraight = 0, kneesTooStraight = 0;
+    for (var i = 0; i < sessionLog.length; i++) {
+      var f = sessionLog[i];
+      if (f.elbowR && f.elbowR > 160) elbowTooStraight++;
+      if (f.kneeR  && f.kneeR  > 160) kneesTooStraight++;
+    }
+
+    var lightReport = {
+      generated: new Date().toISOString(),
+      totalFrames: sessionLog.length,
+      totalAlerts: alertCount,
+      delegate: usedDelegate,
+      summary: {
+        avgElbowAngleR: elbowRVals.length ? avg(elbowRVals).toFixed(1) : null,
+        avgKneeAngleR:  kneeRVals.length  ? avg(kneeRVals).toFixed(1)  : null,
+        maxRotationSpeed: rotVals.length  ? max(rotVals).toFixed(1)    : null,
+        elbowTooStraightFrames: elbowTooStraight,
+        kneesTooStraightFrames: kneesTooStraight
+      },
+      frames: sessionLog.map(function(f) {
+        return { t: f.t, elbowR: f.elbowR, elbowL: f.elbowL, kneeR: f.kneeR, kneeL: f.kneeL, wristH: f.wristH, rotSpeed: f.rotSpeed };
+      })
+    };
+
+    var blob = new Blob([JSON.stringify(lightReport, null, 2)], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "badminton_report_" + new Date().toISOString().slice(0,10) + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    log("\u62a5\u544a\u5df2\u5bfc\u51fa: " + lightReport.totalFrames + " \u5e27");
+    toast("\u2714 \u62a5\u544a\u5df2\u4e0b\u8f7d", 2000);
+  }
+
+  // ── Handle orientation / resize ───────────────────────────
+  var resizeTimer;
+  window.addEventListener("resize", function() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() {
+      if (video.videoWidth && video.videoHeight) {
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+    }, 300);
+  });
+
+  // ── Prevent iOS double-tap zoom on buttons ───────────────
+  document.querySelectorAll("button").forEach(function(b) {
+    b.addEventListener("touchstart", function(e) { /* consume, no preventDefault */ });
+  });
+
+  btnStart.addEventListener("click", startCamera);
+  btnStop.addEventListener("click", stopCamera);
+  btnExport.addEventListener("click", exportReport);
+
+  log("AI \u7fbd\u6bdb\u7403\u6559\u7ec3\u5c31\u7eea\uff0c\u70b9\u201c\u542f\u52a8\u6444\u50cf\u5934\u201d\u5f00\u59cb");
+})();
+</script>
+</body>
+</html>
