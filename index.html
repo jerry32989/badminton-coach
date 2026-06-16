@@ -117,8 +117,8 @@ var loadingScreen = document.getElementById("loadingScreen");
 
 try {
   // Dynamic import so failure shows a visible error
-  var pd = await import("https://esm.sh/@tensorflow-models/pose-detection@2.1.3?bundle");
-  // esm.sh with ?bundle bundles everything including tfjs
+  var pd = await import("https://esm.sh/@tensorflow-models/pose-detection@2.1.3");
+  // esm.sh with  bundles everything including tfjs
   var poseDetection = pd.default || pd;
   window.poseDetection = poseDetection;
   loadingScreen.style.display = "none";
