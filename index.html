@@ -192,11 +192,11 @@ function detectLoop(){
 }
 
 async function initMediaPipe(){
-  loadMsg.textContent="正在下载 AI 模型 (5.7MB)...";
+  loadMsg.textContent="正在下载 AI 模型...";
   var ok=false;
   var tid=setTimeout(function(){if(!ok){loadMsg.textContent="模型下载超时，请检查网络后刷新";loadingScreen.querySelector(".spinner").style.display="none";}},45000);
 
-  var modelUrl="https://jerry32989.github.io/badminton-coach/pose_landmarker_lite.task";
+  var modelUrl="https://cdn.jsdelivr.net/gh/jerry32989/badminton-coach@main/pose_landmarker_lite.task";
   var vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
   log("WASM 加载完成");
 
