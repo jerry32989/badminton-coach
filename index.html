@@ -4,8 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>AI 羽毛球教练</title>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
 <style>
   :root { color-scheme: dark; }
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -39,7 +37,7 @@
   button:active { background: #0d47a1; }
   button:disabled { opacity: 0.35; cursor: not-allowed; }
   .controls label { display: flex; align-items: center; gap: 4px; font-size: 0.8rem; min-height: 40px; padding: 0 4px; touch-action: manipulation; }
-  .controls input[type="checkbox"] { width: 18px; height: 18px; accent-color: #1565c0; }
+  .controls input[type=checkbox] { width: 18px; height: 18px; accent-color: #1565c0; }
   .status-row { display: flex; gap: 10px; flex-wrap: wrap; font-size: 0.72rem; color: #999; }
   .panel { display: grid; grid-template-columns: 1fr; gap: 8px; }
   @media (min-width: 500px) { .panel { grid-template-columns: 1fr 1fr; } }
@@ -97,317 +95,266 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<script type="module">
+import * as tf from 'https://esm.sh/@tensorflow/tfjs@4.17.0';
+import * as poseDetection from 'https://esm.sh/@tensorflow-models/pose-detection@2.1.3';
 
-<script>
-(function() {
-  var video     = document.getElementById("video");
-  var canvas    = document.getElementById("canvas");
-  var ctx       = canvas.getContext("2d");
-  var btnStart  = document.getElementById("btnStart");
-  var btnStop   = document.getElementById("btnStop");
-  var btnExport = document.getElementById("btnExport");
-  var chkSpeech = document.getElementById("chkSpeech");
-  var statusBadge = document.getElementById("statusBadge");
-  var fpsOverlay  = document.getElementById("fpsOverlay");
-  var feedbackOverlay = document.getElementById("feedbackOverlay");
-  var lblFps     = document.getElementById("lblFps");
-  var lblFrames  = document.getElementById("lblFrames");
-  var lblAlerts  = document.getElementById("lblAlerts");
-  var lblModel   = document.getElementById("lblModel");
-  var logArea    = document.getElementById("logArea");
-  var toastEl    = document.getElementById("toast");
+var video     = document.getElementById("video");
+var canvas    = document.getElementById("canvas");
+var ctx       = canvas.getContext("2d");
+var btnStart  = document.getElementById("btnStart");
+var btnStop   = document.getElementById("btnStop");
+var btnExport = document.getElementById("btnExport");
+var chkSpeech = document.getElementById("chkSpeech");
+var statusBadge = document.getElementById("statusBadge");
+var fpsOverlay  = document.getElementById("fpsOverlay");
+var feedbackOverlay = document.getElementById("feedbackOverlay");
+var lblFps     = document.getElementById("lblFps");
+var lblFrames  = document.getElementById("lblFrames");
+var lblAlerts  = document.getElementById("lblAlerts");
+var lblModel   = document.getElementById("lblModel");
+var logArea    = document.getElementById("logArea");
+var toastEl    = document.getElementById("toast");
 
-  var detector = null;
-  var running = false;
-  var animId = null;
-  var frameCount = 0, alertCount = 0;
-  var fpsHistory = [], lastFpsUpdate = 0, currentFps = 0;
-  var prevKeypoints = null, prevTimestamp = 0;
-  var sessionLog = [];
-  var cooldowns = {}, COOLDOWN_MS = 3000;
+var detector = null;
+var running = false;
+var animId = null;
+var detecting = false;
+var frameCount = 0, alertCount = 0;
+var fpsHistory = [], lastFpsUpdate = 0, currentFps = 0;
+var prevKeypoints = null, prevTimestamp = 0;
+var sessionLog = [];
+var cooldowns = {}, COOLDOWN_MS = 3000;
 
-  // MoveNet skeleton connections (17 keypoints)
-  var CONNECTIONS = [
-    [5,6], [5,7], [7,9], [6,8], [8,10],  // arms
-    [5,11], [6,12], [11,12],              // torso
-    [11,13], [13,15], [12,14], [14,16]    // legs
-  ];
+var CONNECTIONS = [[5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16]];
 
-  function toast(msg, ms) {
-    toastEl.textContent = msg; toastEl.style.opacity = "1";
-    clearTimeout(toast._tid);
-    toast._tid = setTimeout(function() { toastEl.style.opacity = "0"; }, ms || 2000);
+function toast(msg, ms) {
+  toastEl.textContent = msg; toastEl.style.opacity = "1";
+  clearTimeout(toast._tid);
+  toast._tid = setTimeout(function() { toastEl.style.opacity = "0"; }, ms || 2000);
+}
+
+function angle2d(a, b, c) {
+  var ba = [a.x - b.x, a.y - b.y], bc = [c.x - b.x, c.y - b.y];
+  var dot = ba[0]*bc[0] + ba[1]*bc[1];
+  var mBA = Math.sqrt(ba[0]*ba[0] + ba[1]*ba[1]);
+  var mBC = Math.sqrt(bc[0]*bc[0] + bc[1]*bc[1]);
+  if (mBA < 1e-6 || mBC < 1e-6) return 0;
+  return (Math.acos(Math.max(-1, Math.min(1, dot/(mBA*mBC)))) * 180) / Math.PI;
+}
+
+function log(msg) {
+  var div = document.createElement("div");
+  div.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
+  logArea.prepend(div);
+  while (logArea.children.length > 50) logArea.lastChild.remove();
+}
+
+function speak(text) {
+  if (!chkSpeech.checked || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  var u = new SpeechSynthesisUtterance(text);
+  u.lang = "zh-CN"; u.rate = 1.0; u.pitch = 1.0; u.volume = 0.9;
+  window.speechSynthesis.speak(u);
+}
+
+function tryFeedback(key, text) {
+  var now = Date.now();
+  if (cooldowns[key] && now - cooldowns[key] < COOLDOWN_MS) return;
+  cooldowns[key] = now;
+  alertCount++;
+  lblAlerts.textContent = "提醒: " + alertCount;
+  feedbackOverlay.textContent = text;
+  feedbackOverlay.style.opacity = "1";
+  setTimeout(function() { feedbackOverlay.style.opacity = "0"; }, 1500);
+  log(text); speak(text);
+}
+
+function drawSkeleton(kps) {
+  var w = canvas.width, h = canvas.height;
+  var lw = Math.max(1.5, Math.min(w, h) / 300);
+  ctx.strokeStyle = "rgba(0,255,100,0.55)"; ctx.lineWidth = lw;
+  for (var i = 0; i < CONNECTIONS.length; i++) {
+    var a = CONNECTIONS[i][0], b = CONNECTIONS[i][1];
+    if (kps[a].score < 0.3 || kps[b].score < 0.3) continue;
+    ctx.beginPath();
+    ctx.moveTo(kps[a].x, kps[a].y);
+    ctx.lineTo(kps[b].x, kps[b].y);
+    ctx.stroke();
   }
-
-  function angle2d(a, b, c) {
-    var ba = [a.x - b.x, a.y - b.y];
-    var bc = [c.x - b.x, c.y - b.y];
-    var dot = ba[0]*bc[0] + ba[1]*bc[1];
-    var mBA = Math.sqrt(ba[0]*ba[0] + ba[1]*ba[1]);
-    var mBC = Math.sqrt(bc[0]*bc[0] + bc[1]*bc[1]);
-    if (mBA < 1e-6 || mBC < 1e-6) return 0;
-    return (Math.acos(Math.max(-1, Math.min(1, dot/(mBA*mBC)))) * 180) / Math.PI;
+  var r = Math.max(2.5, Math.min(w, h) / 180);
+  for (var j = 0; j < kps.length; j++) {
+    var kp = kps[j];
+    if (kp.score < 0.3) continue;
+    ctx.beginPath(); ctx.arc(kp.x, kp.y, r, 0, 2*Math.PI);
+    ctx.fillStyle = "#00ff64"; ctx.fill();
   }
-
-  function log(msg) {
-    var div = document.createElement("div");
-    div.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
-    logArea.prepend(div);
-    while (logArea.children.length > 50) logArea.lastChild.remove();
+  var keys = [5,6,7,8,9,10,11,12,13,14];
+  for (var k = 0; k < keys.length; k++) {
+    var kp2 = kps[keys[k]];
+    if (kp2.score < 0.3) continue;
+    ctx.beginPath(); ctx.arc(kp2.x, kp2.y, r+2, 0, 2*Math.PI);
+    ctx.strokeStyle = "#ffeb3b"; ctx.lineWidth = 1.5; ctx.stroke();
   }
+}
 
-  function speak(text) {
-    if (!chkSpeech.checked || !window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    var u = new SpeechSynthesisUtterance(text);
-    u.lang = "zh-CN"; u.rate = 1.0; u.pitch = 1.0; u.volume = 0.9;
-    window.speechSynthesis.speak(u);
-  }
-
-  function tryFeedback(key, text) {
-    var now = Date.now();
-    if (cooldowns[key] && now - cooldowns[key] < COOLDOWN_MS) return;
-    cooldowns[key] = now;
-    alertCount++;
-    lblAlerts.textContent = "提醒: " + alertCount;
-    feedbackOverlay.textContent = text;
-    feedbackOverlay.style.opacity = "1";
-    setTimeout(function() { feedbackOverlay.style.opacity = "0"; }, 1500);
-    log(text); speak(text);
-  }
-
-  function drawSkeleton(keypoints) {
-    var w = canvas.width, h = canvas.height;
-    var lw = Math.max(1.5, Math.min(w, h) / 300);
-
-    ctx.strokeStyle = "rgba(0,255,100,0.55)"; ctx.lineWidth = lw;
-    for (var i = 0; i < CONNECTIONS.length; i++) {
-      var a = CONNECTIONS[i][0], b = CONNECTIONS[i][1];
-      if (keypoints[a].score < 0.3 || keypoints[b].score < 0.3) continue;
-      ctx.beginPath();
-      ctx.moveTo(keypoints[a].x, keypoints[a].y);
-      ctx.lineTo(keypoints[b].x, keypoints[b].y);
-      ctx.stroke();
+function analyzePose(kps, ts) {
+  var shL=kps[5],shR=kps[6],elL=kps[7],elR=kps[8],wrL=kps[9],wrR=kps[10];
+  var hiL=kps[11],hiR=kps[12],knL=kps[13],knR=kps[14],anL=kps[15],anR=kps[16];
+  function ok(a,b,c){return a&&b&&c&&a.score>0.3&&b.score>0.3&&c.score>0.3;}
+  var eaR=ok(shR,elR,wrR)?angle2d(shR,elR,wrR):null;
+  var eaL=ok(shL,elL,wrL)?angle2d(shL,elL,wrL):null;
+  var kaR=ok(hiR,knR,anR)?angle2d(hiR,knR,anR):null;
+  var kaL=ok(hiL,knL,anL)?angle2d(hiL,knL,anL):null;
+  var wristH=null;
+  if(shR&&wrR&&shR.score>0.3&&wrR.score>0.3) wristH=shR.y-wrR.y;
+  var rotSpeed=0;
+  if(shL&&shR&&shL.score>0.3&&shR.score>0.3&&prevKeypoints){
+    var pL=prevKeypoints[5],pR=prevKeypoints[6];
+    if(pL&&pR&&pL.score>0.3&&pR.score>0.3){
+      var ca=Math.atan2(shR.y-shL.y,shR.x-shL.x)*180/Math.PI;
+      var pa=Math.atan2(pR.y-pL.y,pR.x-pL.x)*180/Math.PI;
+      var dt=(ts-prevTimestamp)/1000;
+      if(dt>0)rotSpeed=Math.abs(ca-pa)/dt;
     }
-
-    var r = Math.max(2.5, Math.min(w, h) / 180);
-    for (var j = 0; j < keypoints.length; j++) {
-      var kp = keypoints[j];
-      if (kp.score < 0.3) continue;
-      ctx.beginPath(); ctx.arc(kp.x, kp.y, r, 0, 2*Math.PI);
-      ctx.fillStyle = "#00ff64"; ctx.fill();
-    }
-
-    var keys = [5,6,7,8,9,10,11,12,13,14];
-    for (var k = 0; k < keys.length; k++) {
-      var kp = keypoints[keys[k]];
-      if (kp.score < 0.3) continue;
-      ctx.beginPath(); ctx.arc(kp.x, kp.y, r+2, 0, 2*Math.PI);
-      ctx.strokeStyle = "#ffeb3b"; ctx.lineWidth = 1.5; ctx.stroke();
-    }
   }
+  function setM(id,val,th){
+    var el=document.getElementById(id);
+    if(val==null){el.textContent="--";el.className="val";return;}
+    var sfx=id.indexOf("Angle")!==-1?"\u00b0":(id.indexOf("Speed")!==-1?"\u00b0/s":"");
+    el.textContent=val.toFixed(1)+sfx;
+    if(th)el.className="val "+(val<=th[0]?"good":val<=th[1]?"warn":"bad");
+  }
+  setM("mElbowR",eaR,[80,130]);setM("mElbowL",eaL,[80,130]);
+  setM("mKneeR",kaR,[140,160]);setM("mKneeL",kaL,[140,160]);
+  setM("mRotSpeed",rotSpeed,null);setM("mWristH",wristH,null);
+  if(eaR!==null&&eaR>160)tryFeedback("er","右肘太直，屈肘准备发力");
+  if(eaL!==null&&eaL>160)tryFeedback("el","左肘太直，屈肘准备发力");
+  if(kaR!==null&&kaR>160)tryFeedback("kr","膝盖太直，微屈膝降低重心");
+  if(kaL!==null&&kaL>160)tryFeedback("kl","膝盖太直，微屈膝降低重心");
+  if(wristH!==null&&wristH<-1)tryFeedback("wl","手腕低于肩，举拍准备");
+  if(rotSpeed>200)tryFeedback("rf","身体旋转过快，注意重心");
+  sessionLog.push({t:ts,elbowR:eaR,elbowL:eaL,kneeR:kaR,kneeL:kaL,wristH:wristH,rotSpeed:rotSpeed});
+  prevKeypoints=kps;prevTimestamp=ts;
+}
 
-  function analyzePose(keypoints, ts) {
-    // MoveNet keypoints: 5=左肩 6=右肩 7=左肘 8=右肘 9=左腕 10=右腕
-    //                    11=左髋 12=右髋 13=左膝 14=右膝 15=左踝 16=右踝
-    var shL = keypoints[5],  shR = keypoints[6];
-    var elL = keypoints[7],  elR = keypoints[8];
-    var wrL = keypoints[9],  wrR = keypoints[10];
-    var hiL = keypoints[11], hiR = keypoints[12];
-    var knL = keypoints[13], knR = keypoints[14];
-    var anL = keypoints[15], anR = keypoints[16];
-
-    function ok(a,b,c) { return a&&b&&c && a.score>0.3 && b.score>0.3 && c.score>0.3; }
-
-    var eaR = ok(shR,elR,wrR) ? angle2d(shR,elR,wrR) : null;
-    var eaL = ok(shL,elL,wrL) ? angle2d(shL,elL,wrL) : null;
-    var kaR = ok(hiR,knR,anR) ? angle2d(hiR,knR,anR) : null;
-    var kaL = ok(hiL,knL,anL) ? angle2d(hiL,knL,anL) : null;
-
-    var wristH = null;
-    if (shR && wrR && shR.score>0.3 && wrR.score>0.3) {
-      wristH = shR.y - wrR.y;
-    }
-
-    var rotSpeed = 0;
-    if (shL && shR && shL.score>0.3 && shR.score>0.3 && prevKeypoints) {
-      var pL = prevKeypoints[5], pR = prevKeypoints[6];
-      if (pL && pR && pL.score>0.3 && pR.score>0.3) {
-        var ca = Math.atan2(shR.y-shL.y, shR.x-shL.x)*180/Math.PI;
-        var pa = Math.atan2(pR.y-pL.y, pR.x-pL.x)*180/Math.PI;
-        var dt = (ts - prevTimestamp)/1000;
-        if (dt > 0) rotSpeed = Math.abs(ca - pa)/dt;
+async function detectLoop() {
+  if(!running)return;
+  var now=performance.now();
+  if(detector&&video.readyState>=2&&!detecting){
+    detecting=true;
+    try{
+      var poses=await detector.estimatePoses(video);
+      if(poses&&poses.length>0&&poses[0].keypoints){
+        var kps=poses[0].keypoints;
+        if(canvas.width!==video.videoWidth||canvas.height!==video.videoHeight){
+          canvas.width=video.videoWidth;canvas.height=video.videoHeight;
+        }
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+        drawSkeleton(kps);
+        analyzePose(kps,now);
+        frameCount++;
       }
-    }
+    }catch(e){log("检测错误: "+(e.message||e));}
+    detecting=false;
+  }
+  fpsHistory.push(now);
+  while(fpsHistory.length&&fpsHistory[0]<now-1000)fpsHistory.shift();
+  if(now-lastFpsUpdate>500){
+    currentFps=fpsHistory.length;
+    fpsOverlay.textContent=currentFps+" FPS";
+    lblFps.textContent="FPS: "+currentFps;
+    lblFrames.textContent="帧数: "+frameCount;
+    lastFpsUpdate=now;
+  }
+  animId=requestAnimationFrame(detectLoop);
+}
 
-    function setM(id, val, th) {
-      var el = document.getElementById(id);
-      if (val == null) { el.textContent = "--"; el.className = "val"; return; }
-      var sfx = id.indexOf("Angle")!==-1 ? "\u00b0" : (id.indexOf("Speed")!==-1 ? "\u00b0/s" : "");
-      el.textContent = val.toFixed(1) + sfx;
-      if (th) { el.className = "val " + (val<=th[0] ? "good" : val<=th[1] ? "warn" : "bad"); }
-    }
+async function initModel(){
+  statusBadge.textContent="加载中...";statusBadge.className="badge load";
+  toast("正在加载 AI 模型...",3000);
+  await tf.ready();
+  log("TF.js 后端: "+(tf.getBackend()||"?"));
 
-    setM("mElbowR", eaR, [80,130]); setM("mElbowL", eaL, [80,130]);
-    setM("mKneeR",  kaR, [140,160]); setM("mKneeL",  kaL, [140,160]);
-    setM("mRotSpeed", rotSpeed, null); setM("mWristH", wristH, null);
+  detector=await poseDetection.createDetector(
+    poseDetection.SupportedModels.MoveNet,
+    {modelType:poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING}
+  );
+  lblModel.textContent="模型: MoveNet"; 
+  statusBadge.textContent="模型就绪";statusBadge.className="badge on";
+  log("MoveNet 模型加载完成");
+  toast("AI 模型就绪",2000);
+}
 
-    if (eaR !== null && eaR > 160) tryFeedback("er","右肘太直，屈肘准备发力");
-    if (eaL !== null && eaL > 160) tryFeedback("el","左肘太直，屈肘准备发力");
-    if (kaR !== null && kaR > 160) tryFeedback("kr","膝盖太直，微屈膝降低重心");
-    if (kaL !== null && kaL > 160) tryFeedback("kl","膝盖太直，微屈膝降低重心");
-    if (wristH !== null && wristH < -1) tryFeedback("wl","手腕低于肩，举拍准备");
-    if (rotSpeed > 200) tryFeedback("rf","身体旋转过快，注意重心");
-
-    sessionLog.push({
-      t: ts, elbowR: eaR, elbowL: eaL, kneeR: kaR, kneeL: kaL,
-      wristH: wristH, rotSpeed: rotSpeed
+async function startCamera(){
+  btnStart.disabled=true;
+  statusBadge.textContent="启动中...";statusBadge.className="badge load";
+  try{
+    var stream=await navigator.mediaDevices.getUserMedia({
+      video:{width:{ideal:640,max:640},height:{ideal:480,max:480},facingMode:"user"}
     });
-
-    prevKeypoints = keypoints;
-    prevTimestamp = ts;
-  }
-
-  async function detectLoop() {
-    if (!running) return;
-    var now = performance.now();
-
-    if (detector && video.readyState >= 2) {
-      try {
-        var poses = await detector.estimatePoses(video);
-        if (poses && poses.length > 0 && poses[0].keypoints) {
-          var kps = poses[0].keypoints;
-          if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-          }
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          drawSkeleton(kps);
-          analyzePose(kps, now);
-          frameCount++;
-        }
-      } catch(e) {}
-    }
-
-    fpsHistory.push(now);
-    while (fpsHistory.length && fpsHistory[0] < now-1000) fpsHistory.shift();
-    if (now - lastFpsUpdate > 500) {
-      currentFps = fpsHistory.length;
-      fpsOverlay.textContent = currentFps + " FPS";
-      lblFps.textContent = "FPS: " + currentFps;
-      lblFrames.textContent = "帧数: " + frameCount;
-      lastFpsUpdate = now;
-    }
-    animId = requestAnimationFrame(detectLoop);
-  }
-
-  async function initModel() {
-    statusBadge.textContent = "加载中..."; statusBadge.className = "badge load";
-    toast("正在加载 AI 模型...", 3000);
-
-    await tf.ready();
-    detector = await poseDetection.createDetector(
-      poseDetection.SupportedModels.MoveNet,
-      { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
-    );
-
-    lblModel.textContent = "模型: MoveNet";
-    statusBadge.textContent = "模型就绪"; statusBadge.className = "badge on";
-    log("MoveNet 模型加载完成");
-    toast("AI 模型就绪", 2000);
-  }
-
-  async function startCamera() {
-    btnStart.disabled = true;
-    statusBadge.textContent = "启动中..."; statusBadge.className = "badge load";
-
-    try {
-      var stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640, max: 640 }, height: { ideal: 480, max: 480 }, facingMode: "user" }
-      });
-      video.srcObject = stream;
-      await video.play();
-
-      if (!detector) {
-        try {
-          await initModel();
-        } catch(e) {
-          log("模型加载失败: " + e.message);
-          toast("模型加载失败，请检查网络", 4000);
-          statusBadge.textContent = "模型失败"; statusBadge.className = "badge off";
-          video.srcObject.getTracks().forEach(function(t) { t.stop(); });
-          video.srcObject = null;
-          btnStart.disabled = false;
-          return;
-        }
+    video.srcObject=stream;
+    await video.play();
+    if(!detector){
+      try{await initModel();}catch(e){
+        log("模型加载失败: "+(e.message||e));
+        toast("模型加载失败，请刷新重试",4000);
+        statusBadge.textContent="模型失败";statusBadge.className="badge off";
+        video.srcObject.getTracks().forEach(function(t){t.stop();});
+        video.srcObject=null;btnStart.disabled=false;return;
       }
-
-      running = true; frameCount = 0; alertCount = 0;
-      sessionLog = []; prevKeypoints = null; prevTimestamp = 0;
-      fpsHistory = [];
-      Object.keys(cooldowns).forEach(function(k) { delete cooldowns[k]; });
-
-      detectLoop();
-      btnStop.disabled = false; btnExport.disabled = false;
-      statusBadge.textContent = "运行中"; statusBadge.className = "badge on";
-      log("摄像头已启动"); toast("开始分析姿态", 1500);
-    } catch(e) {
-      log("错误: " + (e.message||e));
-      statusBadge.textContent = "启动失败"; statusBadge.className = "badge off";
-      btnStart.disabled = false;
-      if ((e.message||"").indexOf("NotAllowed")!==-1) toast("请允许摄像头权限", 4000);
-      else toast("错误: " + (e.message||"").slice(0,40), 4000);
     }
+    running=true;frameCount=0;alertCount=0;
+    sessionLog=[];prevKeypoints=null;prevTimestamp=0;
+    fpsHistory=[];detecting=false;
+    Object.keys(cooldowns).forEach(function(k){delete cooldowns[k];});
+    detectLoop();
+    btnStop.disabled=false;btnExport.disabled=false;
+    statusBadge.textContent="运行中";statusBadge.className="badge on";
+    log("摄像头已启动");toast("开始分析姿态",1500);
+  }catch(e){
+    log("错误: "+(e.message||e));
+    statusBadge.textContent="启动失败";statusBadge.className="badge off";btnStart.disabled=false;
+    if((e.message||"").indexOf("NotAllowed")!==-1)toast("请允许摄像头权限",4000);
+    else toast((e.message||"").slice(0,40),4000);
   }
+}
 
-  function stopCamera() {
-    running = false;
-    if (animId) { cancelAnimationFrame(animId); animId = null; }
-    if (video.srcObject) {
-      video.srcObject.getTracks().forEach(function(t) { t.stop(); });
-      video.srcObject = null;
-    }
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    btnStart.disabled = false; btnStop.disabled = true;
-    statusBadge.textContent = "已停止"; statusBadge.className = "badge off";
-    log("已停止");
+function stopCamera(){
+  running=false;
+  if(animId){cancelAnimationFrame(animId);animId=null;}
+  if(video.srcObject){video.srcObject.getTracks().forEach(function(t){t.stop();});video.srcObject=null;}
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  btnStart.disabled=false;btnStop.disabled=true;
+  statusBadge.textContent="已停止";statusBadge.className="badge off";
+  log("已停止");
+}
+
+function exportReport(){
+  if(!sessionLog.length){toast("没有数据可导出",2000);return;}
+  function avg(a){var s=0;for(var i=0;i<a.length;i++)s+=a[i];return s/a.length;}
+  function max(a){var m=-Infinity;for(var i=0;i<a.length;i++){if(a[i]>m)m=a[i];}return m;}
+  var ev=[],kv=[],rv=[],es=0,ks=0;
+  for(var i=0;i<sessionLog.length;i++){
+    var f=sessionLog[i];
+    if(f.elbowR!=null)ev.push(f.elbowR);
+    if(f.kneeR!=null)kv.push(f.kneeR);
+    if(f.rotSpeed!=null)rv.push(f.rotSpeed);
+    if(f.elbowR&&f.elbowR>160)es++;if(f.kneeR&&f.kneeR>160)ks++;
   }
+  var rpt={generated:new Date().toISOString(),totalFrames:sessionLog.length,totalAlerts:alertCount,model:"MoveNet Lightning",summary:{avgElbowAngleR:ev.length?avg(ev).toFixed(1):null,avgKneeAngleR:kv.length?avg(kv).toFixed(1):null,maxRotationSpeed:rv.length?max(rv).toFixed(1):null,elbowTooStraight:es,kneesTooStraight:ks},frames:sessionLog};
+  var blob=new Blob([JSON.stringify(rpt,null,2)],{type:"application/json"});
+  var a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="badminton_report_"+new Date().toISOString().slice(0,10)+".json";
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  log("报告已导出: "+rpt.totalFrames+" 帧");toast("报告已下载",2000);
+}
 
-  function exportReport() {
-    if (!sessionLog.length) { toast("没有数据可导出", 2000); return; }
-    function avg(a) { var s=0; for(var i=0;i<a.length;i++)s+=a[i]; return s/a.length; }
-    function max(a) { var m=-Infinity; for(var i=0;i<a.length;i++){if(a[i]>m)m=a[i];} return m; }
-    var ev=[], kv=[], rv=[], es=0, ks=0;
-    for (var i=0;i<sessionLog.length;i++) {
-      var f=sessionLog[i];
-      if(f.elbowR!=null)ev.push(f.elbowR);
-      if(f.kneeR!=null)kv.push(f.kneeR);
-      if(f.rotSpeed!=null)rv.push(f.rotSpeed);
-      if(f.elbowR&&f.elbowR>160)es++; if(f.kneeR&&f.kneeR>160)ks++;
-    }
-    var rpt = {
-      generated: new Date().toISOString(), totalFrames: sessionLog.length,
-      totalAlerts: alertCount, model: "MoveNet Lightning",
-      summary: {
-        avgElbowAngleR: ev.length?avg(ev).toFixed(1):null,
-        avgKneeAngleR: kv.length?avg(kv).toFixed(1):null,
-        maxRotationSpeed: rv.length?max(rv).toFixed(1):null,
-        elbowTooStraight: es, kneesTooStraight: ks
-      },
-      frames: sessionLog
-    };
-    var blob = new Blob([JSON.stringify(rpt,null,2)],{type:"application/json"});
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "badminton_report_"+new Date().toISOString().slice(0,10)+".json";
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    log("报告已导出: "+rpt.totalFrames+" 帧"); toast("报告已下载", 2000);
-  }
-
-  btnStart.addEventListener("click", startCamera);
-  btnStop.addEventListener("click", stopCamera);
-  btnExport.addEventListener("click", exportReport);
-  log("AI 羽毛球教练就绪 - MoveNet");
-})();
+btnStart.addEventListener("click",function(){startCamera().catch(function(e){log("启动异常: "+(e.message||e));statusBadge.textContent="启动失败";statusBadge.className="badge off";btnStart.disabled=false;});});
+btnStop.addEventListener("click",stopCamera);
+btnExport.addEventListener("click",exportReport);
+log("就绪 - MoveNet ESM - 点启动");
 </script>
 </body>
 </html>
